@@ -296,6 +296,27 @@ def get_stock_extra_info():
 
 
 # ==========================================
+# 人气排行映射
+# ==========================================
+@st.cache_data(ttl=600)
+def get_hot_rank_map():
+    """返回 {code: rank} 映射，参考东方财富人气榜"""
+    hot_map = {}
+    try:
+        df_hot = ak.stock_hot_rank_em()
+        if df_hot is not None and not df_hot.empty:
+            for _, r in df_hot.iterrows():
+                raw_code = str(r.iloc[1])  # 第二列为代码（如 SH600000）
+                rank = int(r.iloc[0])       # 第一列为排名
+                # 去掉 SH/SZ/BJ 前缀得到6位代码
+                code = raw_code[-6:] if len(raw_code) >= 6 else raw_code.zfill(6)
+                hot_map[code] = rank
+    except Exception:
+        pass
+    return hot_map
+
+
+# ==========================================
 # 选股主引擎
 # ==========================================
 def run_screening(
@@ -449,6 +470,18 @@ def run_screening(
 
     result_df = pd.DataFrame(qualified)
     result_df = result_df.sort_values('大阳线涨幅(%)', ascending=False)
+
+    # Step 6: 补充人气排名
+    hot_map = get_hot_rank_map()
+    if hot_map:
+        result_df['人气排名'] = result_df['代码'].map(hot_map)
+        # 没匹配到的填最大值（表示不入榜）
+        result_df['人气排名'] = pd.to_numeric(result_df['人气排名'], errors='coerce')
+        result_df['人气排名'] = result_df['人气排名'].fillna(9999).astype(int)
+        # 默认按人气排名升序排（人气高的在前），排在"大阳线涨幅"之后
+        result_df = result_df.sort_values('人气排名', ascending=True)
+    else:
+        result_df['人气排名'] = '-'
 
     return result_df, f"🎯 选出 {len(result_df)} 只 | 并发 {workers} 线程 | 扫描 {total} 只" + (f" | 淘汰: {fail_detail}" if fail_detail else "")
 
@@ -694,7 +727,7 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
 
     # ---- 带板块颜色的表格 ----
     display_cols = [
-        '代码', '名称', '板块', '最新价', '涨跌幅', '成交额(亿)',
+        '代码', '名称', '人气排名', '板块', '最新价', '涨跌幅', '成交额(亿)',
         '总市值(亿)', '流通市值(亿)', '所属行业', '所属地区',
         '大阳线日期', '大阳线涨幅(%)', '大阳线最低价', '后续最低价',
         '距大阳线底(%)', '后续成交额均值(亿)', '成交额波动率(%)',
