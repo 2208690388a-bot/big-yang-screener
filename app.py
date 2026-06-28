@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import os
 import io
-import time
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -129,7 +129,81 @@ def create_mini_kline(df_hist, width_px=240, height_px=80):
 
 
 # ==========================================
-# 选股核心逻辑
+# 单只股票分析函数（供线程池调用）
+# ==========================================
+def analyze_one(code, name, row_data, start_date, end_date,
+                big_yang_threshold, min_after_days, min_volume,
+                max_amplitude, max_volume_volatility):
+    try:
+        hist = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq",
+                                  start_date=start_date, end_date=end_date)
+        if hist.empty or len(hist) < 10:
+            return None
+
+        hist.rename(columns={
+            '开盘': 'Open', '收盘': 'Close', '最高': 'High',
+            '最低': 'Low', '成交额': 'Volume', '涨跌幅': 'Pct_chg'
+        }, inplace=True)
+
+        hist_10 = hist.tail(10).reset_index(drop=True)
+
+        if 'Pct_chg' not in hist_10.columns:
+            hist_10['Pct_chg'] = hist_10['Close'].pct_change() * 100
+        hist_10.loc[0, 'Pct_chg'] = 0
+
+        big_idx = hist_10[hist_10['Pct_chg'] > big_yang_threshold].index
+        if len(big_idx) == 0:
+            return None
+        big_i = big_idx[-1]
+
+        big_low = hist_10.loc[big_i, 'Low']
+        big_pct = hist_10.loc[big_i, 'Pct_chg']
+
+        after = hist_10.iloc[big_i + 1:]
+        if len(after) < min_after_days:
+            return None
+        if (after['Low'] < big_low).any():
+            return None
+
+        after_vols = after['Volume']
+        after_amp = (after['High'] - after['Low']) / after['Low'] * 100
+
+        if (after['Volume'] <= min_volume).any():
+            return None
+        if (after_amp >= max_amplitude).any():
+            return None
+
+        vmax, vmin = after_vols.max(), after_vols.min()
+        vol_sv = (vmax - vmin) / vmax
+        if vol_sv > max_volume_volatility:
+            return None
+
+        is_limit = '是' if big_pct >= 9.9 else '否'
+        by_date = hist_10.iloc[big_i].get('日期', None)
+
+        return {
+            '代码': code,
+            '名称': name,
+            '最新价': row_data.get('最新价', np.nan),
+            '涨跌幅': row_data.get('涨跌幅', np.nan),
+            '成交额(亿)': row_data.get('成交额', np.nan) / 1e8 if pd.notna(row_data.get('成交额')) else np.nan,
+            '大阳线日期': by_date,
+            '大阳线涨幅(%)': round(big_pct, 2),
+            '大阳线最低价': big_low,
+            '后续最低价': after['Low'].min(),
+            '距大阳线底(%)': round((after['Low'].min() / big_low - 1) * 100, 2),
+            '后续成交额均值(亿)': round(after_vols.mean() / 1e8, 2),
+            '成交额波动率(%)': round(vol_sv * 100, 2),
+            '后续最大振幅(%)': round(after_amp.max(), 2),
+            '大阳线涨停': is_limit,
+            '历史K线(10日)': hist_10
+        }
+    except Exception:
+        return None
+
+
+# ==========================================
+# 选股核心逻辑（多线程并发版）
 # ==========================================
 def run_screening(
     min_volume=3e8,
@@ -141,6 +215,7 @@ def run_screening(
 ):
     status = st.empty()
 
+    # Step 1: 获取全市场行情
     status.info("🚀 正在获取全市场实时行情数据...")
     df_spot = None
     for func in ['stock_zh_a_spot_em', 'stock_zh_a_spot']:
@@ -164,95 +239,56 @@ def run_screening(
     if '代码' in df_spot.columns:
         df_spot['代码'] = df_spot['代码'].astype(str).str.zfill(6)
 
+    # Step 2: 初筛
     df_candidate = df_spot[df_spot['成交额'] > min_volume].copy()
     total = len(df_candidate)
     if df_candidate.empty:
         return None, f"📊 成交额>{min_volume/1e8:.0f}亿 候选为 0"
 
-    status.success(f"📊 初筛候选: {total} 只 | 开始逐只分析历史K线...")
-
+    # Step 3: 准备日期参数
     today = datetime.now()
     end_date = today.strftime('%Y%m%d')
     start_date = (today - timedelta(days=history_days)).strftime('%Y%m%d')
 
+    # 线程数：根据候选量动态调整
+    workers = min(16, max(8, total // 20))
+    status.success(
+        f"📊 初筛候选: {total} 只 | "
+        f"⚡ 并发 {workers} 线程 | "
+        f"预计耗时 {total/(workers*3):.0f}-{total/(workers*2):.0f} 分钟"
+    )
+
+    # Step 4: 多线程并发拉取
     qualified = []
-    progress_bar = st.progress(0, text="准备分析...")
+    progress_bar = st.progress(0, text=f"⚡ 并发 {workers} 线程启动中...")
 
-    for idx, (_, row) in enumerate(df_candidate.iterrows(), 1):
-        code = row['代码']
-        name = row['名称']
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for _, row in df_candidate.iterrows():
+            code = row['代码']
+            name = row['名称']
+            f = executor.submit(
+                analyze_one, code, name, row,
+                start_date, end_date,
+                big_yang_threshold, min_after_days, min_volume,
+                max_amplitude, max_volume_volatility
+            )
+            futures[f] = code
 
-        progress_bar.progress(idx / total, text=f"⏳ [{idx}/{total}] {code} {name}")
-
-        try:
-            hist = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq",
-                                      start_date=start_date, end_date=end_date)
-            if hist.empty or len(hist) < 10:
-                continue
-
-            hist.rename(columns={
-                '开盘': 'Open', '收盘': 'Close', '最高': 'High',
-                '最低': 'Low', '成交额': 'Volume', '涨跌幅': 'Pct_chg'
-            }, inplace=True)
-
-            hist_10 = hist.tail(10).reset_index(drop=True)
-
-            if 'Pct_chg' not in hist_10.columns:
-                hist_10['Pct_chg'] = hist_10['Close'].pct_change() * 100
-            hist_10.loc[0, 'Pct_chg'] = 0
-
-            big_idx = hist_10[hist_10['Pct_chg'] > big_yang_threshold].index
-            if len(big_idx) == 0:
-                continue
-            big_i = big_idx[-1]
-
-            big_low = hist_10.loc[big_i, 'Low']
-            big_pct = hist_10.loc[big_i, 'Pct_chg']
-
-            after = hist_10.iloc[big_i + 1:]
-            if len(after) < min_after_days:
-                continue
-
-            if (after['Low'] < big_low).any():
-                continue
-
-            after_vols = after['Volume']
-            after_amp = (after['High'] - after['Low']) / after['Low'] * 100
-
-            if (after['Volume'] <= min_volume).any():
-                continue
-            if (after_amp >= max_amplitude).any():
-                continue
-
-            vmax, vmin = after_vols.max(), after_vols.min()
-            vol_sv = (vmax - vmin) / vmax
-            if vol_sv > max_volume_volatility:
-                continue
-
-            is_limit = '是' if big_pct >= 9.9 else '否'
-            by_date = hist_10.iloc[big_i].get('日期', None)
-
-            qualified.append({
-                '代码': code,
-                '名称': name,
-                '最新价': row.get('最新价', np.nan),
-                '涨跌幅': row.get('涨跌幅', np.nan),
-                '成交额(亿)': row.get('成交额', np.nan) / 1e8 if pd.notna(row.get('成交额')) else np.nan,
-                '大阳线日期': by_date,
-                '大阳线涨幅(%)': round(big_pct, 2),
-                '大阳线最低价': big_low,
-                '后续最低价': after['Low'].min(),
-                '距大阳线底(%)': round((after['Low'].min() / big_low - 1) * 100, 2),
-                '后续成交额均值(亿)': round(after_vols.mean() / 1e8, 2),
-                '成交额波动率(%)': round(vol_sv * 100, 2),
-                '后续最大振幅(%)': round(after_amp.max(), 2),
-                '大阳线涨停': is_limit,
-                '历史K线(10日)': hist_10
-            })
-        except Exception:
-            continue
-
-        time.sleep(0.1)
+        completed = 0
+        for future in as_completed(futures):
+            completed += 1
+            code = futures[future]
+            pct = completed / total
+            elapsed_est = ""
+            progress_bar.progress(
+                pct,
+                text=f"⚡ [{completed}/{total}] {code} | 并发{workers}线程 | "
+                     f"完成 {pct*100:.0f}%"
+            )
+            result = future.result()
+            if result is not None:
+                qualified.append(result)
 
     progress_bar.empty()
 
@@ -262,7 +298,7 @@ def run_screening(
     result_df = pd.DataFrame(qualified)
     result_df = result_df.sort_values('大阳线涨幅(%)', ascending=False)
 
-    return result_df, f"🎯 成功选出 {len(result_df)} 只股票！"
+    return result_df, f"🎯 成功选出 {len(result_df)} 只股票！（并发 {workers} 线程扫描 {total} 只候选）"
 
 
 # ==========================================
