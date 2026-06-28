@@ -495,7 +495,7 @@ for key, default in [('result_df', None), ('msg', ''), ('fw', False),
 # 主页面
 # ==========================================
 st.title("Quantitative Stock Screening")
-st.markdown("**策略：** 近20日出现大阳线 → 后续N日不破底 + 成交额稳定 + 振幅可控")
+st.markdown("**策略：** 近10日出现大阳线 → 后续N日不破底 + 成交额稳定 + 振幅可控")
 
 # ==========================================
 # 控制面板
@@ -740,9 +740,9 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
     # K线图
     st.markdown("### 📊 K线走势（近20日）")
     with st.expander("点击展开/收起 K线图", expanded=False):
-        for i in range(0, len(df), 2):
-            cols_k = st.columns(2)
-            for j in range(2):
+        for i in range(0, len(df), 3):
+            cols_k = st.columns(3)
+            for j in range(3):
                 idx = i + j
                 if idx >= len(df):
                     break
