@@ -22,23 +22,78 @@ st.set_page_config(
     page_title="QuantStock | 大阳线不破低选股",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"  # 默认隐藏侧边栏
 )
 
-hide_st_style = """
+# ==========================================
+# 移动端友好 CSS
+# ==========================================
+st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
+
+/* 完全隐藏侧边栏 */
+[data-testid="stSidebar"] {
+    display: none !important;
+}
+[data-testid="stSidebarCollapsedControl"] {
+    display: none !important;
+}
+
+/* 控制面板卡片 */
+.control-panel {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+/* 顶部标题栏 */
+.top-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+    flex-wrap: wrap;
+}
+
+/* 数值显示标签 */
+.param-badge {
+    display: inline-block;
+    background: #1D4ED8;
+    color: white;
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: bold;
+}
+
+/* 移动端按钮更大 */
+.run-btn {
+    padding: 0.75rem 2rem !important;
+    font-size: 1.1rem !important;
+}
+
+/* 响应式：小屏幕上指标卡片变两列 */
+@media screen and (max-width: 768px) {
+    .stColumns {
+        flex-wrap: wrap !important;
+    }
+    h1 {
+        font-size: 1.5rem !important;
+    }
+}
 </style>
-"""
-st.markdown(hide_st_style, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 
 # ==========================================
 # K线图绘制
 # ==========================================
-def create_mini_kline(df_hist, width_px=160, height_px=42):
+def create_mini_kline(df_hist, width_px=240, height_px=80):
     fig, ax = plt.subplots(figsize=(width_px / 100, height_px / 100), dpi=100)
     ax.axis('off')
     fig.patch.set_alpha(0)
@@ -86,7 +141,6 @@ def run_screening(
 ):
     status = st.empty()
 
-    # 获取全市场行情
     status.info("🚀 正在获取全市场实时行情数据...")
     df_spot = None
     for func in ['stock_zh_a_spot_em', 'stock_zh_a_spot']:
@@ -99,7 +153,6 @@ def run_screening(
     if df_spot is None or df_spot.empty:
         return None, "❌ 行情数据获取失败"
 
-    # 类型转换
     for col in ['成交额', '最新价', '涨跌幅', '最高', '最低']:
         if col not in df_spot.columns:
             return None, f"❌ 缺少列: {col}"
@@ -111,7 +164,6 @@ def run_screening(
     if '代码' in df_spot.columns:
         df_spot['代码'] = df_spot['代码'].astype(str).str.zfill(6)
 
-    # 初筛
     df_candidate = df_spot[df_spot['成交额'] > min_volume].copy()
     total = len(df_candidate)
     if df_candidate.empty:
@@ -119,7 +171,6 @@ def run_screening(
 
     status.success(f"📊 初筛候选: {total} 只 | 开始逐只分析历史K线...")
 
-    # 时间范围
     today = datetime.now()
     end_date = today.strftime('%Y%m%d')
     start_date = (today - timedelta(days=history_days)).strftime('%Y%m%d')
@@ -150,7 +201,6 @@ def run_screening(
                 hist_10['Pct_chg'] = hist_10['Close'].pct_change() * 100
             hist_10.loc[0, 'Pct_chg'] = 0
 
-            # 大阳线
             big_idx = hist_10[hist_10['Pct_chg'] > big_yang_threshold].index
             if len(big_idx) == 0:
                 continue
@@ -163,7 +213,6 @@ def run_screening(
             if len(after) < min_after_days:
                 continue
 
-            # 不破底
             if (after['Low'] < big_low).any():
                 continue
 
@@ -181,7 +230,6 @@ def run_screening(
                 continue
 
             is_limit = '是' if big_pct >= 9.9 else '否'
-            latest = hist_10.iloc[-1]
             by_date = hist_10.iloc[big_i].get('日期', None)
 
             qualified.append({
@@ -218,40 +266,82 @@ def run_screening(
 
 
 # ==========================================
-# 侧边栏
+# 初始 Session State
 # ==========================================
-with st.sidebar:
-    st.title("⚙️ 参数设置")
-    st.markdown("---")
-
-    big_yang_pct = st.slider("📈 大阳线最低涨幅(%)", 3.0, 15.0, 5.5, 0.5)
-    min_vol = st.slider("💰 最低成交额(亿元)", 1.0, 10.0, 3.0, 0.5)
-    min_days = st.slider("📅 后续最少交易日", 2, 10, 3, 1)
-    max_amp = st.slider("📊 后续最大振幅(%)", 3.0, 15.0, 8.0, 0.5)
-    max_vsv = st.slider("📉 成交额波动率上限", 0.10, 0.60, 0.30, 0.05)
-
-    st.markdown("---")
-
-    if st.button("🚀 开始选股", use_container_width=True, type="primary"):
-        st.session_state.go = True
-
-    st.caption("数据: 新浪/东方财富 | 缓存: 无")
-
-
-# ==========================================
-# 主页面
-# ==========================================
-st.title("🔥 大阳线不破低 · 量化选股")
-st.markdown("""
-**策略：** 近10日出现大阳线 → 后续N日不破底 + 成交额稳定 + 振幅可控
-""")
-
 if 'result_df' not in st.session_state:
     st.session_state.result_df = None
     st.session_state.msg = ""
+if 'params' not in st.session_state:
+    st.session_state.params = {}
+if 'fw' not in st.session_state:
+    st.session_state.fw = False
 
-if st.session_state.get('go'):
-    with st.spinner('⏳ 全市场扫描中...'):
+# ==========================================
+# 主页面标题
+# ==========================================
+st.title("🔥 大阳线不破低 · 量化选股")
+st.markdown("**策略：** 近10日出现大阳线 → 后续N日不破底 + 成交额稳定 + 振幅可控")
+
+# ==========================================
+# 可折叠控制面板（替代侧边栏）
+# ==========================================
+ctrl = st.expander("⚙️ 参数设置（点击展开/收起）", expanded=not st.session_state.get('hide_ctrl'))
+
+with ctrl:
+    # 用两列布局适配手机
+    c_left, c_right = st.columns([1, 1])
+
+    with c_left:
+        big_yang_pct = st.slider(
+            "📈 大阳线最低涨幅(%)", 3.0, 15.0, 5.5, 0.5,
+            help="近10日内单日涨幅超过此值视为大阳线"
+        )
+        min_vol = st.slider(
+            "💰 最低成交额(亿元)", 1.0, 10.0, 3.0, 0.5,
+            help="候选股当日及后续每日成交额需高于此值"
+        )
+        min_days = st.slider(
+            "📅 后续最少交易日", 2, 10, 3, 1,
+            help="大阳线后至少经过多少个交易日"
+        )
+
+    with c_right:
+        max_amp = st.slider(
+            "📊 后续最大振幅(%)", 3.0, 15.0, 8.0, 0.5,
+            help="后续每日振幅不得超过此值"
+        )
+        max_vsv = st.slider(
+            "📉 成交额波动率上限", 0.10, 0.60, 0.30, 0.05,
+            help="(最大-最小)/最大，超此值则波动过大"
+        )
+
+        # 显示当前参数速览
+        st.markdown(f"""
+        <div style='background:#F3F4F6;border-radius:8px;padding:8px 12px;font-size:0.85rem;margin-top:8px;'>
+        当前设定：阳线 <b>{big_yang_pct}%</b> · 成交额 <b>{min_vol}亿</b> · 后续 <b>{min_days}日</b> · 振幅 <b>{max_amp}%</b> · 波动 <b>{max_vsv}</b>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 按钮行
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+    with btn_col1:
+        if st.button("🚀 开始选股", use_container_width=True, type="primary"):
+            st.session_state.fw = True
+    with btn_col2:
+        if st.button("🔄 重置参数", use_container_width=True):
+            st.session_state.fw = False
+            st.session_state.result_df = None
+            st.session_state.msg = ""
+            st.rerun()
+
+    st.caption("📡 数据源：新浪财经 / 东方财富实时接口 | 分析周期：近25个交易日")
+
+
+# ==========================================
+# 执行选股
+# ==========================================
+if st.session_state.fw:
+    with st.spinner('⏳ 全市场扫描中，请稍候...（约5000只股票需逐只分析）'):
         result_df, msg = run_screening(
             min_volume=min_vol * 1e8,
             big_yang_threshold=big_yang_pct,
@@ -261,21 +351,31 @@ if st.session_state.get('go'):
         )
     st.session_state.result_df = result_df
     st.session_state.msg = msg
-    st.session_state.go = False
+    st.session_state.fw = False
 
+# ==========================================
 # 结果展示
+# ==========================================
 if st.session_state.result_df is not None and len(st.session_state.result_df) > 0:
     df = st.session_state.result_df
+
+    st.markdown("---")
     st.success(st.session_state.msg)
 
+    # 指标卡片 - 小屏两列、大屏四列
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("🏆 选出", f"{len(df)} 只")
     c2.metric("📈 大阳线均值", f"{df['大阳线涨幅(%)'].mean():.2f}%")
     c3.metric("💰 成交额均值", f"{df['后续成交额均值(亿)'].mean():.2f}亿")
     c4.metric("📊 振幅均值", f"{df['后续最大振幅(%)'].mean():.2f}%")
 
+    # 涨停统计
+    limit_count = (df['大阳线涨停'] == '是').sum()
+    st.markdown(f"🔴 其中**涨停**大阳线：**{limit_count}** 只 | 非涨停：**{len(df) - limit_count}** 只")
+
     st.markdown("---")
 
+    # 数据表格
     display_cols = [
         '代码', '名称', '最新价', '涨跌幅', '成交额(亿)',
         '大阳线日期', '大阳线涨幅(%)', '大阳线最低价', '后续最低价',
@@ -300,31 +400,39 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
 
     st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
 
-    # K线图
-    with st.expander("📊 查看 K 线走势图", expanded=False):
-        for i in range(0, len(df), 3):
-            cols = st.columns(3)
-            for j in range(3):
+    # K线走势图
+    st.markdown("### 📊 K线走势（近10日）")
+    kline_expander = st.expander("点击展开/收起 K线图", expanded=False)
+    with kline_expander:
+        for i in range(0, len(df), 2):
+            cols_k = st.columns(2)
+            for j in range(2):
                 idx = i + j
                 if idx >= len(df):
                     break
                 row = df.iloc[idx]
-                with cols[j]:
+                with cols_k[j]:
                     try:
-                        buf = create_mini_kline(row['历史K线(10日)'], width_px=240, height_px=80)
+                        buf = create_mini_kline(row['历史K线(10日)'], width_px=350, height_px=100)
                         st.image(buf, use_container_width=True)
                     except Exception:
                         st.caption("渲染失败")
-                    st.caption(f"**{row['代码']} {row['名称']}** | 大阳线{row['大阳线涨幅(%)']:+.2f}%")
+                    yz = '🔴涨停' if row['大阳线涨停'] == '是' else '🟢大阳'
+                    st.caption(
+                        f"**{row['代码']} {row['名称']}** | "
+                        f"{yz} {row['大阳线涨幅(%)']:+.2f}% | "
+                        f"距底 {row['距大阳线底(%)']:+.2f}%"
+                    )
 
     # 导出
-    col_a, col_b = st.columns(2)
-    with col_a:
+    st.markdown("---")
+    cc1, cc2 = st.columns(2)
+    with cc1:
         csv = df[display_cols].to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 下载 CSV", csv,
                            f"选股_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                            "text/csv", type="primary")
-    with col_b:
+    with cc2:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine='openpyxl') as w:
             df[display_cols].to_excel(w, index=False, sheet_name='选股结果')
@@ -333,24 +441,23 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 elif st.session_state.result_df is not None and len(st.session_state.result_df) == 0:
+    st.markdown("---")
     st.warning(st.session_state.msg)
-    st.info("💡 请放宽左侧参数")
+    st.info("💡 提示：尝试放宽参数（降低大阳线阈值、放宽振幅限制等）")
 
 else:
-    st.info("👈 请在左侧设置参数后点击「🚀 开始选股」")
+    st.markdown("---")
+    st.info("👆 在上方控制面板设置参数后，点击「🚀 开始选股」运行策略")
     st.markdown("""
-    ---
-    ### 📋 流程
-    ```
-    全市场A股 (~5000只)
-        │ 成交额初筛
-        ▼
-    逐只分析近25日历史K线
-        │
-        ▼
-    近10日找大阳线 → 验证后续不破底 + 量能稳定 + 振幅可控
-        │
-        ▼
-    ✅ 输出结果 + K线走势 + CSV/Excel导出
-    ```
+    ### 📋 筛选流程
+
+    | 步骤 | 说明 |
+    |------|------|
+    | ① | 全市场 A 股约 5000 只，按成交额初筛 |
+    | ② | 逐只拉取近 25 日历史 K 线数据 |
+    | ③ | 近 10 日内寻找**大阳线**（涨幅 > 设定阈值） |
+    | ④ | 验证后续交易日：📌 不破底 · 💰 成交额稳定 · 📊 振幅可控 |
+    | ⑤ | ✅ 输出结果 + K 线走势图 + CSV / Excel 导出 |
+
+    > 手机端自动适配，展开/收起均可用 ✅
     """)
