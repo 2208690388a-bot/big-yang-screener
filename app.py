@@ -19,7 +19,7 @@ os.environ['all_proxy'] = ''
 os.environ['ALL_PROXY'] = ''
 
 st.set_page_config(
-    page_title="QuantStock | 大阳线不破低选股",
+    page_title="Quantitative Stock Screening",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -145,7 +145,8 @@ def analyze_one(code, name, row_data, start_date, end_date,
             return None, 'column_mismatch'
 
         hist = hist.rename(columns=col_map)
-        hist_10 = hist.tail(10).reset_index(drop=True)
+        hist_10 = hist.tail(10).reset_index(drop=True)      # 筛选用近10日
+        hist_20 = hist.tail(20).reset_index(drop=True)      # K线展示用近20日
 
         # 补充 Pct_chg 列
         if 'Pct_chg' not in hist_10.columns:
@@ -230,7 +231,7 @@ def analyze_one(code, name, row_data, start_date, end_date,
             '成交额波动率(%)': round(vol_sv * 100, 2),
             '后续最大振幅(%)': round(after_amp.max(), 2),
             '大阳线涨停': is_limit,
-            '历史K线(10日)': hist_10
+            '历史K线(20日)': hist_20
         }, 'ok'
     except Exception as e:
         return None, f'error: {str(e)[:60]}'
@@ -493,8 +494,8 @@ for key, default in [('result_df', None), ('msg', ''), ('fw', False),
 # ==========================================
 # 主页面
 # ==========================================
-st.title("🔥 大阳线不破低 · 量化选股")
-st.markdown("**策略：** 近10日出现大阳线 → 后续N日不破底 + 成交额稳定 + 振幅可控")
+st.title("Quantitative Stock Screening")
+st.markdown("**策略：** 近20日出现大阳线 → 后续N日不破底 + 成交额稳定 + 振幅可控")
 
 # ==========================================
 # 控制面板
@@ -702,14 +703,14 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
 
     display_df = df[display_cols].copy()
 
-    def color_name_by_board(row):
+    def color_name_by_board(df_subset):
         """根据板块给名称列着色"""
-        try:
-            code = str(row['代码'])
+        styles = pd.DataFrame('', index=df_subset.index, columns=df_subset.columns)
+        for i in df_subset.index:
+            code = str(df_subset.at[i, '代码'])
             _, color = get_board(code)
-            return [f'color: {color}; font-weight: bold;'] * len(row)
-        except Exception:
-            return [''] * len(row)
+            styles.at[i, '名称'] = f'color: {color}; font-weight: bold;'
+        return styles
 
     def color_pct(val):
         if pd.isna(val):
@@ -727,6 +728,7 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
     }
 
     styled = display_df.style \
+        .apply(color_name_by_board, axis=None) \
         .map(color_pct, subset=['涨跌幅']) \
         .format(fmt_dict)
 
@@ -736,7 +738,7 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
     st.markdown("🔴 **沪深主板** · 🔵 **创业板** · 🟣 **科创板** · 🟢 **北交所**")
 
     # K线图
-    st.markdown("### 📊 K线走势（近10日）")
+    st.markdown("### 📊 K线走势（近20日）")
     with st.expander("点击展开/收起 K线图", expanded=False):
         for i in range(0, len(df), 2):
             cols_k = st.columns(2)
@@ -747,7 +749,7 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
                 row = df.iloc[idx]
                 with cols_k[j]:
                     try:
-                        buf = create_mini_kline(row['历史K线(10日)'], width_px=350, height_px=100)
+                        buf = create_mini_kline(row['历史K线(20日)'], width_px=350, height_px=100)
                         st.image(buf, use_container_width=True)
                     except Exception:
                         st.caption("渲染失败")
