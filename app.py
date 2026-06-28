@@ -64,18 +64,18 @@ header {visibility: hidden;}
 # 板块识别
 # ==========================================
 def get_board(code_str):
-    """根据代码前缀返回板块标签"""
+    """根据代码前缀返回 (板块名称, 颜色, 上市地区)"""
     if code_str.startswith('60'):
-        return '沪市主板', '#DC2626'  # 红
+        return '沪市主板', '#DC2626', '上海'
     elif code_str.startswith('00'):
-        return '深市主板', '#DC2626'  # 红
+        return '深市主板', '#DC2626', '深圳'
     elif code_str.startswith('30'):
-        return '创业板', '#2563EB'    # 蓝
+        return '创业板', '#2563EB', '深圳'
     elif code_str.startswith('688'):
-        return '科创板', '#7C3AED'    # 紫
+        return '科创板', '#7C3AED', '上海'
     elif code_str.startswith('8') or code_str.startswith('4'):
-        return '北交所', '#059669'
-    return '其他', '#6B7280'
+        return '北交所', '#059669', '北京'
+    return '其他', '#6B7280', '其他'
 
 
 # ==========================================
@@ -163,17 +163,13 @@ def analyze_one(code, name, row_data, start_date, end_date,
                 float_cap = pd.to_numeric(row_data.get('流通市值', np.nan), errors='coerce')
                 if pd.isna(float_cap) or float_cap < extra_limits['min_float_cap']:
                     return None, 'float_cap_filter'
-            if extra_limits.get('min_free_cap'):
-                free_cap = pd.to_numeric(row_data.get('自由流通市值', np.nan), errors='coerce')
-                if pd.isna(free_cap) or free_cap < extra_limits['min_free_cap']:
-                    return None, 'free_cap_filter'
             if extra_limits.get('industries'):
                 industry = str(row_data.get('所属行业', ''))
                 if industry and industry not in extra_limits['industries']:
                     return None, 'industry_filter'
             if extra_limits.get('regions'):
-                region = str(row_data.get('所属地区', ''))
-                if region and region not in extra_limits['regions']:
+                _, _, code_region = get_board(code)
+                if code_region not in extra_limits['regions']:
                     return None, 'region_filter'
 
         # ---- 大阳线筛选 ----
@@ -208,7 +204,7 @@ def analyze_one(code, name, row_data, start_date, end_date,
         if by_date is None and 'date' in hist_10.columns:
             by_date = hist_10.iloc[big_i].get('date', None)
 
-        board_name, board_color = get_board(code)
+        board_name, board_color, region = get_board(code)
 
         return {
             '代码': code,
@@ -221,7 +217,7 @@ def analyze_one(code, name, row_data, start_date, end_date,
             '总市值(亿)': pd.to_numeric(row_data.get('总市值', np.nan), errors='coerce') / 1e8,
             '流通市值(亿)': pd.to_numeric(row_data.get('流通市值', np.nan), errors='coerce') / 1e8,
             '所属行业': str(row_data.get('所属行业', '')),
-            '所属地区': str(row_data.get('所属地区', '')),
+            '所属地区': region,
             '大阳线日期': by_date,
             '大阳线涨幅(%)': round(big_pct, 2),
             '大阳线最低价': round(big_low, 2),
@@ -363,12 +359,11 @@ def run_screening(
     if '代码' in df_spot.columns:
         df_spot['代码'] = df_spot['代码'].astype(str).str.zfill(6)
 
-    # Step 2: 加载行业/地区映射（仅在启用额外过滤时）
+    # Step 2: 加载行业映射（仅在启用行业过滤时）
     extra_map = {}
     if extra_filters_enabled:
         need_industry = bool(extra_limits.get('industries'))
-        need_region = bool(extra_limits.get('regions'))
-        if need_industry or need_region:
+        if need_industry:
             with st.spinner('📋 正在加载行业/地区分类数据...'):
                 extra_map = get_stock_extra_info()
                 if extra_map:
@@ -581,13 +576,6 @@ with ctrl:
                     help="仅保留总市值大于此值的股票")
                 extra_limits['min_total_cap'] = min_total_cap * 1e8
 
-            use_free_cap = st.checkbox("💎 自由流通市值过滤", value=False)
-            if use_free_cap:
-                min_free_cap = st.number_input(
-                    "最小自由流通市值(亿元)", min_value=0.0, value=10.0, step=5.0,
-                    help="自由流通市值大致=流通市值-大股东/战略投资者持股")
-                extra_limits['min_free_cap'] = min_free_cap * 1e8
-
             use_industry = st.checkbox("🏭 所属行业过滤", value=False)
             if use_industry:
                 selected_industries = None
@@ -618,26 +606,17 @@ with ctrl:
                     help="仅保留流通市值大于此值的股票")
                 extra_limits['min_float_cap'] = min_float_cap * 1e8
 
-            use_region = st.checkbox("📍 所属地区过滤", value=False)
+            use_region = st.checkbox("📍 上市地区过滤", value=False,
+                                       help="按交易所上市地区筛选（上海/深圳/北京）")
             if use_region:
-                selected_regions = None
-                if not st.session_state.get('region_list'):
-                    try:
-                        df_area_names = ak.stock_board_area_name_em()
-                        st.session_state.region_list = sorted(
-                            df_area_names['板块名称'].dropna().unique().tolist())
-                    except Exception:
-                        st.session_state.region_list = []
-                        st.warning("地区列表加载失败")
-
-                if st.session_state.get('region_list'):
-                    selected_regions = st.multiselect(
-                        "选择地区（可多选，留空=全部）",
-                        options=st.session_state.region_list,
-                        default=[],
-                        placeholder="例如: 上海、广东、北京...")
-                    if selected_regions:
-                        extra_limits['regions'] = selected_regions
+                REGION_OPTIONS = ['上海', '深圳', '北京']
+                selected_regions = st.multiselect(
+                    "选择地区（可多选，留空=全部）",
+                    options=REGION_OPTIONS,
+                    default=[],
+                    placeholder="例如: 上海、深圳")
+                if selected_regions:
+                    extra_limits['regions'] = selected_regions
 
         # 额外筛选摘要
         active_filters = []
@@ -645,8 +624,6 @@ with ctrl:
             active_filters.append(f"总市值>{extra_limits['min_total_cap']/1e8:.0f}亿")
         if extra_limits.get('min_float_cap'):
             active_filters.append(f"流通市值>{extra_limits['min_float_cap']/1e8:.0f}亿")
-        if extra_limits.get('min_free_cap'):
-            active_filters.append(f"自由流通>{extra_limits['min_free_cap']/1e8:.0f}亿")
         if extra_limits.get('industries'):
             active_filters.append(f"行业:{','.join(extra_limits['industries'][:3])}{'...' if len(extra_limits['industries'])>3 else ''}")
         if extra_limits.get('regions'):
@@ -741,7 +718,7 @@ if st.session_state.result_df is not None and len(st.session_state.result_df) > 
         styles = pd.DataFrame('', index=df_subset.index, columns=df_subset.columns)
         for i in df_subset.index:
             code = str(df_subset.at[i, '代码'])
-            _, color = get_board(code)
+            _, color, _ = get_board(code)
             styles.at[i, '名称'] = f'color: {color}; font-weight: bold;'
         return styles
 
