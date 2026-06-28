@@ -126,78 +126,87 @@ def analyze_one(code, name, row_data, start_date, end_date,
         hist = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq",
                                   start_date=start_date, end_date=end_date)
         if hist.empty or len(hist) < 10:
-            return None
+            return None, 'data_too_short'
 
-        hist.rename(columns={
-            '开盘': 'Open', '收盘': 'Close', '最高': 'High',
-            '最低': 'Low', '成交额': 'Volume', '涨跌幅': 'Pct_chg'
-        }, inplace=True)
+        # 兼容不同 akshare 版本的列名（中文/英文）
+        col_map = {}
+        for en, cn_list in [('Open', ['开盘', 'open']),
+                            ('Close', ['收盘', 'close']),
+                            ('High', ['最高', 'high']),
+                            ('Low', ['最低', 'low']),
+                            ('Volume', ['成交额', 'volume']),
+                            ('Pct_chg', ['涨跌幅', 'pct_chg', 'pctChg'])]:
+            for cn in cn_list:
+                if cn in hist.columns:
+                    col_map[cn] = en
+                    break
 
+        if len(col_map) < 5:
+            return None, 'column_mismatch'
+
+        hist = hist.rename(columns=col_map)
         hist_10 = hist.tail(10).reset_index(drop=True)
 
+        # 补充 Pct_chg 列
         if 'Pct_chg' not in hist_10.columns:
             hist_10['Pct_chg'] = hist_10['Close'].pct_change() * 100
         hist_10.loc[0, 'Pct_chg'] = 0
 
-        # ---- ⭐ 额外过滤：市值、流通市值、行业、地区 ----
+        # ---- 额外过滤 ----
         if extra_filters_enabled:
-            # 总市值过滤
             if extra_limits.get('min_total_cap'):
-                total_cap = row_data.get('总市值', np.nan)
+                total_cap = pd.to_numeric(row_data.get('总市值', np.nan), errors='coerce')
                 if pd.isna(total_cap) or total_cap < extra_limits['min_total_cap']:
-                    return None
-            # 流通市值过滤
+                    return None, 'total_cap_filter'
             if extra_limits.get('min_float_cap'):
-                float_cap = row_data.get('流通市值', np.nan)
+                float_cap = pd.to_numeric(row_data.get('流通市值', np.nan), errors='coerce')
                 if pd.isna(float_cap) or float_cap < extra_limits['min_float_cap']:
-                    return None
-            # 自由流通市值过滤
+                    return None, 'float_cap_filter'
             if extra_limits.get('min_free_cap'):
-                free_cap = row_data.get('自由流通市值', np.nan)
+                free_cap = pd.to_numeric(row_data.get('自由流通市值', np.nan), errors='coerce')
                 if pd.isna(free_cap) or free_cap < extra_limits['min_free_cap']:
-                    return None
-            # 行业过滤
+                    return None, 'free_cap_filter'
             if extra_limits.get('industries'):
-                industry = row_data.get('所属行业', '')
+                industry = str(row_data.get('所属行业', ''))
                 if industry and industry not in extra_limits['industries']:
-                    return None
-            # 地区过滤
+                    return None, 'industry_filter'
             if extra_limits.get('regions'):
-                region = row_data.get('所属地区', '')
+                region = str(row_data.get('所属地区', ''))
                 if region and region not in extra_limits['regions']:
-                    return None
+                    return None, 'region_filter'
 
         # ---- 大阳线筛选 ----
         big_idx = hist_10[hist_10['Pct_chg'] > big_yang_threshold].index
         if len(big_idx) == 0:
-            return None
+            return None, 'no_big_yang'
         big_i = big_idx[-1]
         big_low = hist_10.loc[big_i, 'Low']
         big_pct = hist_10.loc[big_i, 'Pct_chg']
 
         after = hist_10.iloc[big_i + 1:]
         if len(after) < min_after_days:
-            return None
+            return None, 'not_enough_after_days'
         if (after['Low'] < big_low).any():
-            return None
+            return None, 'broke_below'
 
         after_vols = after['Volume']
         after_amp = (after['High'] - after['Low']) / after['Low'] * 100
 
         if (after['Volume'] <= min_volume).any():
-            return None
+            return None, 'low_volume'
         if (after_amp >= max_amplitude).any():
-            return None
+            return None, 'high_amplitude'
 
         vmax, vmin = after_vols.max(), after_vols.min()
-        vol_sv = (vmax - vmin) / vmax
+        vol_sv = (vmax - vmin) / vmax if vmax > 0 else 0
         if vol_sv > max_volume_volatility:
-            return None
+            return None, 'vol_volatility'
 
         is_limit = '是' if big_pct >= 9.9 else '否'
         by_date = hist_10.iloc[big_i].get('日期', None)
+        if by_date is None and 'date' in hist_10.columns:
+            by_date = hist_10.iloc[big_i].get('date', None)
 
-        # 板块
         board_name, board_color = get_board(code)
 
         return {
@@ -205,26 +214,26 @@ def analyze_one(code, name, row_data, start_date, end_date,
             '名称': name,
             '板块': board_name,
             '板块颜色': board_color,
-            '最新价': row_data.get('最新价', np.nan),
-            '涨跌幅': row_data.get('涨跌幅', np.nan),
-            '成交额(亿)': row_data.get('成交额', np.nan) / 1e8 if pd.notna(row_data.get('成交额')) else np.nan,
-            '总市值(亿)': row_data.get('总市值', np.nan) / 1e8 if pd.notna(row_data.get('总市值')) else np.nan,
-            '流通市值(亿)': row_data.get('流通市值', np.nan) / 1e8 if pd.notna(row_data.get('流通市值')) else np.nan,
-            '所属行业': row_data.get('所属行业', ''),
-            '所属地区': row_data.get('所属地区', ''),
+            '最新价': pd.to_numeric(row_data.get('最新价', np.nan), errors='coerce'),
+            '涨跌幅': pd.to_numeric(row_data.get('涨跌幅', np.nan), errors='coerce'),
+            '成交额(亿)': pd.to_numeric(row_data.get('成交额', np.nan), errors='coerce') / 1e8,
+            '总市值(亿)': pd.to_numeric(row_data.get('总市值', np.nan), errors='coerce') / 1e8,
+            '流通市值(亿)': pd.to_numeric(row_data.get('流通市值', np.nan), errors='coerce') / 1e8,
+            '所属行业': str(row_data.get('所属行业', '')),
+            '所属地区': str(row_data.get('所属地区', '')),
             '大阳线日期': by_date,
             '大阳线涨幅(%)': round(big_pct, 2),
-            '大阳线最低价': big_low,
-            '后续最低价': after['Low'].min(),
+            '大阳线最低价': round(big_low, 2),
+            '后续最低价': round(after['Low'].min(), 2),
             '距大阳线底(%)': round((after['Low'].min() / big_low - 1) * 100, 2),
             '后续成交额均值(亿)': round(after_vols.mean() / 1e8, 2),
             '成交额波动率(%)': round(vol_sv * 100, 2),
             '后续最大振幅(%)': round(after_amp.max(), 2),
             '大阳线涨停': is_limit,
             '历史K线(10日)': hist_10
-        }
-    except Exception:
-        return None
+        }, 'ok'
+    except Exception as e:
+        return None, f'error: {str(e)[:60]}'
 
 
 # ==========================================
@@ -380,6 +389,7 @@ def run_screening(
 
     # Step 5: 多线程分析
     qualified = []
+    reason_counts = {}  # 统计各失败原因
     progress_bar = st.progress(0, text=f"⚡ 并发 {workers} 线程启动中...")
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -403,19 +413,43 @@ def run_screening(
             pct = completed / total
             progress_bar.progress(pct,
                 text=f"⚡ [{completed}/{total}] {code} | 并发{workers}线程 | {pct*100:.0f}%")
-            result = future.result()
-            if result is not None:
-                qualified.append(result)
+            res = future.result()
+            if res[0] is not None:
+                qualified.append(res[0])
+            else:
+                reason = res[1] if res[1] else 'unknown'
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
     progress_bar.empty()
 
+    # 输出统计信息
+    fail_detail = ''
+    if reason_counts:
+        top_reasons = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+        items = []
+        reason_names = {
+            'no_big_yang': '无大阳线', 'broke_below': '破底', 'not_enough_after_days': '后续日不足',
+            'low_volume': '成交额低', 'high_amplitude': '振幅过大', 'vol_volatility': '成交额波动',
+            'data_too_short': '历史数据不足', 'column_mismatch': '数据列不匹配',
+            'total_cap_filter': '总市值过滤', 'float_cap_filter': '流通市值过滤',
+            'industry_filter': '行业过滤', 'region_filter': '地区过滤',
+        }
+        for reason, cnt in top_reasons:
+            name = reason_names.get(reason, reason)
+            items.append(f"{name}({cnt})")
+        fail_detail = ' | '.join(items)
+
     if not qualified:
-        return None, "➔ 无符合条件的股票，请放宽参数"
+        summary = f"➔ 无符合条件的股票（扫描 {total} 只"
+        if fail_detail:
+            summary += f"，淘汰原因: {fail_detail}"
+        summary += "）"
+        return None, summary
 
     result_df = pd.DataFrame(qualified)
     result_df = result_df.sort_values('大阳线涨幅(%)', ascending=False)
 
-    return result_df, f"🎯 选出 {len(result_df)} 只（并发 {workers} 线程 / 候选 {total} 只）"
+    return result_df, f"🎯 选出 {len(result_df)} 只 | 并发 {workers} 线程 | 扫描 {total} 只" + (f" | 淘汰: {fail_detail}" if fail_detail else "")
 
 
 # ==========================================
